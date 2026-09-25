@@ -6,7 +6,7 @@
 herdr-reflow [REPO:BRANCH...]
 ```
 
-Each `REPO:BRANCH` ensures a main workspace and a linked worktree at `~/.grok/worktrees/<slug>/<branch>`. A slash in the branch is a hyphen in the directory name. The dotfiles root sorts first. The program prints the final order as a tree. Each worktree sits under its main checkout.
+Each `REPO:BRANCH` ensures a main workspace and a linked worktree at `~/.grok/worktrees/<slug>/<branch>`. A slash in the branch is a hyphen in the directory name. `%d` in the branch is the local date as `yyyymmdd`, so `.:%d-teste` is `.:20260925-teste` on that day. The repo side stays literal. The dotfiles root sorts first. The program prints the final order as a tree. Each worktree sits under its main checkout.
 
 Global flags are `-h`, `-v`, `--version`, and `--pprof`.
 

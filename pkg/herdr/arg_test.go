@@ -2,6 +2,7 @@ package herdr
 
 import (
 	"testing"
+	"time"
 
 	"github.com/lewtec/lewkit/x/cmd"
 	"github.com/stretchr/testify/assert"
@@ -18,6 +19,16 @@ func TestRepoBranchParse(t *testing.T) {
 	assert.Equal(t, "feat/teste", got.specs[0].Branch)
 	assert.Equal(t, "lewkit", got.specs[1].Repo)
 	assert.Equal(t, "main", got.specs[1].Branch)
+
+	today := time.Now().Format("20060102")
+	dated := cmd.ParseOK[args](t, ".:%d-teste", "%d:keep", "repo:%d/%d")
+	require.Len(t, dated.specs, 3)
+	assert.Equal(t, ".", dated.specs[0].Repo)
+	assert.Equal(t, today+"-teste", dated.specs[0].Branch)
+	assert.Equal(t, "%d", dated.specs[1].Repo)
+	assert.Equal(t, "keep", dated.specs[1].Branch)
+	assert.Equal(t, "repo", dated.specs[2].Repo)
+	assert.Equal(t, today+"/"+today, dated.specs[2].Branch)
 
 	err := cmd.ParseErr[args](t, "nocolon")
 	assert.ErrorIs(t, err, cmd.ErrInvalidArgument)

@@ -25,7 +25,7 @@ func main() {
 }
 
 type root struct {
-	specs []herdr.RepoBranch `help:"REPO:BRANCH, for example .dotfiles:feat/teste"`
+	specs []herdr.RepoBranch `help:"REPO:BRANCH. %d in BRANCH is yyyymmdd. Example: .:%d-teste"`
 }
 
 func (root) Description() string {
