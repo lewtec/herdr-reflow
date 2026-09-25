@@ -1,0 +1,7 @@
+/bin/
+/dist/
+/herdr-reflow
+*.exe
+*.test
+*.out
+.DS_Store
