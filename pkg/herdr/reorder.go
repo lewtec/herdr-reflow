@@ -27,10 +27,13 @@ var (
 // Options selects the checkout that sorts first and the REPO:BRANCH rows to ensure.
 // An empty Pin uses the dotfiles root. Home defaults to the user home directory.
 // Status, when set, receives the phase name for a taskgroup progress view.
+// Pane, when set, moves into the workspace of the last spec when that spec is a
+// linked worktree. The move creates a new tab. An empty Pane skips the move.
 type Options struct {
 	Pin    string
 	Specs  []RepoBranch
 	Home   string
+	Pane   string
 	Client *Client
 	Git    *git.Git
 	Status *taskgroup.Status
@@ -101,8 +104,18 @@ func Reorder(ctx context.Context, opts Options) (Report, error) {
 	if err := p.see(); err != nil {
 		return Report{}, err
 	}
-	for _, spec := range opts.Specs {
-		if err := p.ensure(spec); err != nil {
+	var landID, landLabel string
+	for i, spec := range opts.Specs {
+		id, err := p.ensure(spec)
+		if err != nil {
+			return Report{}, err
+		}
+		if i == len(opts.Specs)-1 {
+			landID, landLabel = id, spec.Branch
+		}
+	}
+	if landID != "" && opts.Pane != "" {
+		if err := p.movePane(opts.Pane, landID, landLabel); err != nil {
 			return Report{}, err
 		}
 	}
@@ -556,27 +569,27 @@ func (p *plan) park() bool {
 			continue
 		}
 		seen[space.RepoRoot] = struct{}{}
-		if p.parkOne(space) {
+		if _, did := p.parkOne(space); did {
 			acted = true
 		}
 	}
 	return acted
 }
 
-func (p *plan) parkOne(space Space) bool {
+func (p *plan) parkOne(space Space) (string, bool) {
 	root := space.RepoRoot
 	branch, ok := p.git.Branch(p.ctx, root)
 	if !ok {
 		p.printf("33", "  %s: detached HEAD, skip park", space.Label)
-		return false
+		return "", false
 	}
 	if branch == "main" || branch == "master" {
-		return false
+		return "", false
 	}
 	def, ok := p.git.DefaultBranch(p.ctx, root)
 	if !ok {
 		p.printf("33", "  %s: no main/master, skip park", space.Label)
-		return false
+		return "", false
 	}
 	wt, have := p.git.LinkedWorktree(p.ctx, root, branch)
 	dirty := p.git.Dirty(p.ctx, root)
@@ -586,7 +599,7 @@ func (p *plan) parkOne(space Space) bool {
 		if err := p.git.Run(p.ctx, root, "stash", "push", "-u", "-m", msg); err != nil {
 			slog.WarnContext(p.ctx, "git", "err", err)
 			p.printf("33", "  %s: stash failed, skip park", space.Label)
-			return false
+			return "", false
 		}
 	}
 	if !have {
@@ -596,7 +609,7 @@ func (p *plan) parkOne(space Space) bool {
 			if dirty {
 				_ = p.git.Run(p.ctx, root, "stash", "pop")
 			}
-			return false
+			return "", false
 		}
 		p.printf("36", "+ git -C %s worktree add -f %s %s", root, wt, branch)
 		if err := p.git.Run(p.ctx, root, "worktree", "add", "-f", wt, branch); err != nil {
@@ -606,7 +619,7 @@ func (p *plan) parkOne(space Space) bool {
 				_ = p.git.Run(p.ctx, root, "stash", "pop")
 			}
 			p.printf("33", "  %s: worktree add failed", space.Label)
-			return false
+			return "", false
 		}
 		p.git.Clear()
 	}
@@ -631,7 +644,7 @@ func (p *plan) parkOne(space Space) bool {
 		if dirty {
 			_ = p.git.Run(p.ctx, root, "stash", "pop")
 		}
-		return wtWS != ""
+		return wtWS, wtWS != ""
 	}
 	p.git.Clear()
 	p.printf("32", "  %s: %s -> %s", space.Label, branch, def)
@@ -644,7 +657,7 @@ func (p *plan) parkOne(space Space) bool {
 			p.printf("32", "  restored dirty work in %s", branch)
 		}
 	}
-	return true
+	return wtWS, true
 }
 
 func (p *plan) relabel() bool {
@@ -872,21 +885,22 @@ func (p *plan) parentWorkspace(root string) (string, bool) {
 	return parent, true
 }
 
-func (p *plan) ensure(spec RepoBranch) error {
+func (p *plan) ensure(spec RepoBranch) (string, error) {
 	p.phase("ensure")
 	root, err := p.resolveRepo(spec.Repo)
 	if err != nil {
-		return err
+		return "", err
 	}
 	p.printf("36", "+ ensure %s:%s", filepath.Base(root), spec.Branch)
 	parent, ok := p.parentWorkspace(root)
 	if !ok {
-		return fmt.Errorf("%w for %s", errNoWorkspace, root)
+		return "", fmt.Errorf("%w for %s", errNoWorkspace, root)
 	}
-	if !p.ensureWorktree(root, spec.Branch, parent) {
-		return fmt.Errorf("%w for %s:%s", errWorktree, spec.Repo, spec.Branch)
+	id, ok := p.ensureWorktree(root, spec.Branch, parent)
+	if !ok {
+		return "", fmt.Errorf("%w for %s:%s", errWorktree, spec.Repo, spec.Branch)
 	}
-	return nil
+	return id, nil
 }
 
 func (p *plan) resolveRepo(token string) (string, error) {
@@ -959,19 +973,14 @@ func expandUser(token, home string) string {
 	return token
 }
 
-func (p *plan) ensureWorktree(root, branch, parent string) bool {
+func (p *plan) ensureWorktree(root, branch, parent string) (string, bool) {
 	if existing, ok := p.git.LinkedWorktree(p.ctx, root, branch); ok {
-		p.printf("36", "+ herdr worktree open --workspace %s --path %s --label %s --no-focus", parent, existing, branch)
-		if _, err := p.client.OpenWorktree(p.ctx, OpenWorktree{Path: existing, Label: branch, Workspace: parent}); err != nil {
-			p.printf("33", "  herdr worktree open: %s", err.Error())
-			return false
-		}
-		return true
+		return p.openLinked(parent, existing, branch)
 	}
 	head, _ := p.git.Branch(p.ctx, root)
 	if head == branch && (branch == "main" || branch == "master") {
 		p.printf("32", "  %s already on %s", filepath.Base(root), branch)
-		return true
+		return "", true
 	}
 	if head == branch {
 		space, ok := p.byID()[parent]
@@ -985,14 +994,33 @@ func (p *plan) ensureWorktree(root, branch, parent string) bool {
 	}
 	path := filepath.Join(p.grok, p.git.GrokSlug(p.ctx, root, p.grok), strings.ReplaceAll(branch, "/", "-"))
 	if !p.addWorktree(root, branch, path) {
-		return false
+		return "", false
 	}
-	p.printf("36", "+ herdr worktree open --workspace %s --path %s --label %s --no-focus", parent, path, branch)
-	if _, err := p.client.OpenWorktree(p.ctx, OpenWorktree{Path: path, Label: branch, Workspace: parent}); err != nil {
+	return p.openLinked(parent, path, branch)
+}
+
+func (p *plan) openLinked(parent, path, label string) (string, bool) {
+	p.printf("36", "+ herdr worktree open --workspace %s --path %s --label %s --no-focus", parent, path, label)
+	result, err := p.client.OpenWorktree(p.ctx, OpenWorktree{Path: path, Label: label, Workspace: parent})
+	if err != nil {
 		p.printf("33", "  herdr worktree open: %s", err.Error())
-		return false
+		return "", false
 	}
-	return true
+	if result.Workspace.ID == "" {
+		p.printf("33", "  herdr worktree open: missing workspace id")
+		return "", false
+	}
+	return result.Workspace.ID, true
+}
+
+func (p *plan) movePane(pane, workspace, label string) error {
+	p.phase("move")
+	p.printf("36", "+ herdr pane move %s --new-tab --workspace %s --focus --label %s", pane, workspace, label)
+	if err := p.client.MovePaneNewTab(p.ctx, pane, workspace, label); err != nil {
+		return err
+	}
+	p.printf("32", "  moved %s to %s", pane, label)
+	return nil
 }
 
 func (p *plan) addWorktree(root, branch, path string) bool {

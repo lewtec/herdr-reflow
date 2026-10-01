@@ -183,6 +183,16 @@ func (c *Client) RenameWorkspace(ctx context.Context, id, label string) error {
 	return err
 }
 
+// MovePaneNewTab moves paneID into workspaceID as a new tab and focuses it.
+func (c *Client) MovePaneNewTab(ctx context.Context, paneID, workspaceID, label string) error {
+	args := []string{"pane", "move", paneID, "--new-tab", "--workspace", workspaceID, "--focus"}
+	if label != "" {
+		args = append(args, "--label", label)
+	}
+	_, err := c.run(ctx, args...)
+	return err
+}
+
 // OpenWorktree runs worktree open.
 func (c *Client) OpenWorktree(ctx context.Context, req OpenWorktree) (Opened, error) {
 	args := []string{"worktree", "open", "--path", req.Path, "--label", req.Label, "--no-focus"}
