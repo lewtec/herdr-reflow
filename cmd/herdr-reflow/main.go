@@ -25,7 +25,7 @@ func main() {
 }
 
 type root struct {
-	specs []herdr.RepoBranch `help:"REPO:BRANCH. %d in BRANCH is yyyymmdd. Example: .:%d-teste"`
+	specs []herdr.RepoBranch `help:"REPO:BRANCH. %d in BRANCH is yyyymmdd. Example: .:%d-teste. Moves HERDR_PANE_ID into the last worktree as a new tab."`
 }
 
 func (root) Description() string {
@@ -40,6 +40,7 @@ func (c *root) Run(ctx context.Context) error {
 			var runErr error
 			report, runErr = herdr.Reorder(ctx, herdr.Options{
 				Specs:  c.specs,
+				Pane:   os.Getenv("HERDR_PANE_ID"),
 				Status: status,
 			})
 			return runErr

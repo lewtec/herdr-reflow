@@ -5,6 +5,7 @@
 // [RepoBranch] is the REPO:BRANCH argument. %d in the branch is yyyymmdd.
 // [Reorder] nests linked worktrees under an open main, parks a feature branch
 // off the main checkout, renames worktree workspaces to their branch, and
-// orders the dotfiles root first.
+// orders the dotfiles root first. When [Options.Pane] is set, the last linked
+// worktree receives that pane as a new tab.
 // Steps are logged with slog. A taskgroup status carries the phase name.
 package herdr
