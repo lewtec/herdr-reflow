@@ -1,7 +1,7 @@
 // Package herdr talks to a running Herdr session and lays out its workspaces.
 //
-// [Client] is the socket CLI: workspaces, tabs, panes, worktree open, and
-// workspace.move_block. Checkouts come from x/git.
+// [Client] talks to the Herdr unix socket: workspaces, tabs, panes, worktree
+// open, and workspace.move_block. Checkouts come from x/git.
 // [RepoBranch] is the REPO:BRANCH argument. %d in the branch is yyyymmdd.
 // [Reorder] nests linked worktrees under an open main, parks a feature branch
 // off the main checkout, renames worktree workspaces to their branch, and

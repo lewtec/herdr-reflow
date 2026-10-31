@@ -1,12 +1,16 @@
 package herdr
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/lewtec/lewkit/x/git"
@@ -16,12 +20,12 @@ import (
 func TestReorderMovesPaneIntoLastWorktree(t *testing.T) {
 	t.Parallel()
 	repo, wts := testRepo(t, "other", "topic")
-	logPath, bin := (fakeSession{repo: repo, wts: wts}).install(t)
+	logPath, sock := (fakeSession{repo: repo, wts: wts}).install(t)
 	_, err := Reorder(t.Context(), Options{
 		Pin:    repo,
 		Home:   t.TempDir(),
 		Pane:   "wCaller",
-		Client: &Client{Bin: bin},
+		Client: &Client{Path: sock},
 		Git:    &git.Git{},
 		Specs: []RepoBranch{
 			{Repo: repo, Branch: "topic"},
@@ -30,19 +34,25 @@ func TestReorderMovesPaneIntoLastWorktree(t *testing.T) {
 	})
 	require.NoError(t, err)
 	moves := paneMoves(t, logPath)
-	require.Equal(t, []string{
-		"pane move wCaller --new-tab --workspace wOther --focus --label other",
-	}, moves)
+	require.Equal(t, []moveRecord{{
+		PaneID: "wCaller",
+		Focus:  true,
+		Destination: moveDest{
+			Type:        "new_tab",
+			WorkspaceID: "wOther",
+			Label:       "other",
+		},
+	}}, moves)
 }
 
 func TestReorderSkipsPaneMoveWithoutPane(t *testing.T) {
 	t.Parallel()
 	repo, wts := testRepo(t, "topic")
-	logPath, bin := (fakeSession{repo: repo, wts: wts}).install(t)
+	logPath, sock := (fakeSession{repo: repo, wts: wts}).install(t)
 	_, err := Reorder(t.Context(), Options{
 		Pin:    repo,
 		Home:   t.TempDir(),
-		Client: &Client{Bin: bin},
+		Client: &Client{Path: sock},
 		Git:    &git.Git{},
 		Specs:  []RepoBranch{{Repo: repo, Branch: "topic"}},
 	})
@@ -53,12 +63,12 @@ func TestReorderSkipsPaneMoveWithoutPane(t *testing.T) {
 func TestReorderSkipsPaneMoveOnMainBranch(t *testing.T) {
 	t.Parallel()
 	repo, wts := testRepo(t, "topic")
-	logPath, bin := (fakeSession{repo: repo, wts: wts}).install(t)
+	logPath, sock := (fakeSession{repo: repo, wts: wts}).install(t)
 	_, err := Reorder(t.Context(), Options{
 		Pin:    repo,
 		Home:   t.TempDir(),
 		Pane:   "wCaller",
-		Client: &Client{Bin: bin},
+		Client: &Client{Path: sock},
 		Git:    &git.Git{},
 		Specs:  []RepoBranch{{Repo: repo, Branch: "main"}},
 	})
@@ -69,30 +79,51 @@ func TestReorderSkipsPaneMoveOnMainBranch(t *testing.T) {
 func TestReorderPaneMoveError(t *testing.T) {
 	t.Parallel()
 	repo, wts := testRepo(t, "topic")
-	logPath, bin := (fakeSession{repo: repo, wts: wts, moveErr: "pane busy"}).install(t)
+	logPath, sock := (fakeSession{repo: repo, wts: wts, moveErr: "pane busy"}).install(t)
 	_, err := Reorder(t.Context(), Options{
 		Pin:    repo,
 		Home:   t.TempDir(),
 		Pane:   "wCaller",
-		Client: &Client{Bin: bin},
+		Client: &Client{Path: sock},
 		Git:    &git.Git{},
 		Specs:  []RepoBranch{{Repo: repo, Branch: "topic"}},
 	})
 	require.ErrorContains(t, err, "pane busy")
-	require.Equal(t, []string{
-		"pane move wCaller --new-tab --workspace wTopic --focus --label topic",
-	}, paneMoves(t, logPath))
+	require.Equal(t, []moveRecord{{
+		PaneID: "wCaller",
+		Focus:  true,
+		Destination: moveDest{
+			Type:        "new_tab",
+			WorkspaceID: "wTopic",
+			Label:       "topic",
+		},
+	}}, paneMoves(t, logPath))
 }
 
-func paneMoves(t *testing.T, logPath string) []string {
+type moveDest struct {
+	Type        string `json:"type"`
+	WorkspaceID string `json:"workspace_id"`
+	Label       string `json:"label"`
+}
+
+type moveRecord struct {
+	PaneID      string   `json:"pane_id"`
+	Focus       bool     `json:"focus"`
+	Destination moveDest `json:"destination"`
+}
+
+func paneMoves(t *testing.T, logPath string) []moveRecord {
 	t.Helper()
 	raw, err := os.ReadFile(logPath)
 	require.NoError(t, err)
-	var moves []string
-	for line := range strings.SplitSeq(string(raw), "\n") {
-		if strings.HasPrefix(line, "pane move ") {
-			moves = append(moves, line)
+	var moves []moveRecord
+	for line := range strings.SplitSeq(strings.TrimSpace(string(raw)), "\n") {
+		if line == "" {
+			continue
 		}
+		var rec moveRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &rec))
+		moves = append(moves, rec)
 	}
 	return moves
 }
@@ -179,66 +210,126 @@ func (s fakeSession) install(t *testing.T) (string, string) {
 			})
 		}
 	}
-	writeJSON(t, filepath.Join(dir, "workspaces"), map[string]any{"result": map[string]any{"workspaces": spaces}})
-	writeJSON(t, filepath.Join(dir, "tabs"), map[string]any{"result": map[string]any{"tabs": tabs}})
-	writeJSON(t, filepath.Join(dir, "panes"), map[string]any{"result": map[string]any{"panes": panes}})
-	openFile := filepath.Join(dir, "opens.tsv")
-	var table strings.Builder
-	for path, payload := range opens {
-		table.WriteString(path)
-		table.WriteByte('\t')
-		table.WriteString(payload)
-		table.WriteByte('\n')
+	require.NoError(t, os.WriteFile(logPath, nil, 0o644))
+	wsResp := mustJSON(t, map[string]any{"result": map[string]any{"workspaces": spaces}})
+	tabsResp := mustJSON(t, map[string]any{"result": map[string]any{"tabs": tabs}})
+	panesResp := mustJSON(t, map[string]any{"result": map[string]any{"panes": panes}})
+	sockPath := filepath.Join(dir, "herdr.sock")
+	ln, err := net.Listen("unix", sockPath)
+	require.NoError(t, err)
+	t.Cleanup(func() { ln.Close() })
+	srv := &fakeServer{
+		ln: ln, logPath: logPath, moveErr: s.moveErr,
+		ws: wsResp, tabs: tabsResp, panes: panesResp, opens: opens,
 	}
-	require.NoError(t, os.WriteFile(openFile, []byte(table.String()), 0o644))
-	script := filepath.Join(dir, "herdr")
-	body := `#!/bin/sh
-printf '%s\n' "$*" >> "$LOG"
-case "$1 $2" in
-  "workspace list") cat "$WS" ;;
-  "tab list") cat "$TABS" ;;
-  "pane list") cat "$PANES" ;;
-  "worktree open")
-    path=""
-    prev=""
-    for arg in "$@"; do
-      if [ "$prev" = "--path" ]; then
-        path=$arg
-      fi
-      prev=$arg
-    done
-    found=$(awk -F '\t' -v path="$path" '$1 == path { print $2; exit }' "$OPENS")
-    if [ -z "$found" ]; then
-      echo "unexpected path: $path" >&2
-      exit 1
-    fi
-    printf '%s\n' "$found"
-    ;;
-  "pane move")
-    if [ -n "$MOVE_ERR" ]; then
-      echo "$MOVE_ERR" >&2
-      exit 1
-    fi
-    printf '%s\n' '{"result":{}}'
-    ;;
-  *)
-    echo "unexpected: $*" >&2
-    exit 1
-    ;;
-esac
-`
-	require.NoError(t, os.WriteFile(script, []byte(body), 0o755))
-	wrapper := filepath.Join(dir, "herdrw")
-	wrap := "#!/bin/sh\n" +
-		"export LOG=" + shQuote(logPath) + "\n" +
-		"export WS=" + shQuote(filepath.Join(dir, "workspaces")) + "\n" +
-		"export TABS=" + shQuote(filepath.Join(dir, "tabs")) + "\n" +
-		"export PANES=" + shQuote(filepath.Join(dir, "panes")) + "\n" +
-		"export OPENS=" + shQuote(openFile) + "\n" +
-		"export MOVE_ERR=" + shQuote(s.moveErr) + "\n" +
-		"exec " + shQuote(script) + " \"$@\"\n"
-	require.NoError(t, os.WriteFile(wrapper, []byte(wrap), 0o755))
-	return logPath, wrapper
+	go srv.serve()
+	return logPath, sockPath
+}
+
+type fakeServer struct {
+	ln      net.Listener
+	mu      sync.Mutex
+	logPath string
+	moveErr string
+	ws      string
+	tabs    string
+	panes   string
+	opens   map[string]string
+}
+
+func (s *fakeServer) serve() {
+	for {
+		conn, err := s.ln.Accept()
+		if err != nil {
+			return
+		}
+		go s.handle(conn)
+	}
+}
+
+func (s *fakeServer) handle(conn net.Conn) {
+	defer conn.Close()
+	line, err := bufio.NewReader(conn).ReadBytes('\n')
+	if err != nil {
+		return
+	}
+	var req struct {
+		Method string          `json:"method"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(line, &req); err != nil {
+		writeRPC(conn, rpcError(req.Method, "bad_request", err.Error()))
+		return
+	}
+	switch req.Method {
+	case "workspace.list":
+		writeRPC(conn, s.ws)
+	case "tab.list":
+		writeRPC(conn, s.tabs)
+	case "pane.list":
+		writeRPC(conn, s.panes)
+	case "worktree.open":
+		var params struct {
+			Path string `json:"path"`
+		}
+		if err := json.Unmarshal(req.Params, &params); err != nil {
+			writeRPC(conn, rpcError(req.Method, "bad_request", err.Error()))
+			return
+		}
+		found, ok := s.opens[params.Path]
+		if !ok {
+			writeRPC(conn, rpcError(req.Method, "unexpected", "unexpected path: "+params.Path))
+			return
+		}
+		writeRPC(conn, found)
+	case "pane.move":
+		s.mu.Lock()
+		err := appendLog(s.logPath, req.Params)
+		s.mu.Unlock()
+		if err != nil {
+			writeRPC(conn, rpcError(req.Method, "log", err.Error()))
+			return
+		}
+		if s.moveErr != "" {
+			writeRPC(conn, rpcError(req.Method, "move", s.moveErr))
+			return
+		}
+		writeRPC(conn, `{"id":"pane.move","result":{}}`)
+	case "workspace.move_block", "workspace.rename", "workspace.create":
+		writeRPC(conn, `{"id":"`+req.Method+`","result":{}}`)
+	default:
+		writeRPC(conn, rpcError(req.Method, "unexpected", "unexpected: "+req.Method))
+	}
+}
+
+func appendLog(path string, line []byte) error {
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return err
+	}
+	_, werr := f.Write(append(line, '\n'))
+	cerr := f.Close()
+	return errors.Join(werr, cerr)
+}
+
+func writeRPC(conn net.Conn, payload string) {
+	if err := writeLine(conn, payload); err != nil {
+		return
+	}
+}
+
+func rpcError(method, code, message string) string {
+	raw, err := json.Marshal(map[string]any{
+		"id": method,
+		"error": map[string]string{
+			"code":    code,
+			"message": message,
+		},
+	})
+	if err != nil {
+		return `{"id":"error","error":{"code":"marshal","message":"marshal"}}`
+	}
+	return string(raw)
 }
 
 func workspaceID(branch string) string {
@@ -252,20 +343,9 @@ func workspaceID(branch string) string {
 	}
 }
 
-func writeJSON(t *testing.T, path string, doc any) {
-	t.Helper()
-	raw, err := json.Marshal(doc)
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, append(raw, '\n'), 0o644))
-}
-
 func mustJSON(t *testing.T, doc any) string {
 	t.Helper()
 	raw, err := json.Marshal(doc)
 	require.NoError(t, err)
 	return string(raw)
-}
-
-func shQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
