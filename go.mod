@@ -3,7 +3,7 @@ module github.com/lewtec/herdr-reflow
 go 1.27.1
 
 require (
-	github.com/lewtec/lewkit v0.0.0-20260924225131-02facc2b009d
+	github.com/lewtec/lewkit v0.0.0-20261124190124-d44587ca3404
 	github.com/stretchr/testify v1.12.1
 )
 
